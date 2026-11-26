@@ -1,0 +1,5 @@
+iot_display
+monitor.log
+venv/
+__pycache__/
+*.pyc
