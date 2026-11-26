@@ -262,6 +262,7 @@ example unit with its executable path pointed at this checkout.
 | CLI tests | Passed: 23 invalid and 2 valid configurations |
 | Isolated Mosquitto integration suite | Passed after final corrections: QoS 0/1, reconnect, repeated alerts matched to logs, active/inactive sections, reactivation, terminal and signal checks |
 | Malformed-number MQTT regressions | Passed: 41 rejected messages at QoS 0 and 41 at QoS 1; no state, timer, alert, or valid-telemetry-log effects; separate rejection records checked |
+| Rejected-telemetry logging | Passed: receipt timestamps/topics/reasons, one record per rejection, bounded topic escaping, optional-off behavior, rejection-log failure recovery; full normal/ASan/UBSan/TSan suites passed |
 | Supplied simulator against a QoS 1 subscription | Passed; broker log confirmed telemetry QoS 0 |
 | AddressSanitizer + UndefinedBehaviorSanitizer | Passed after final corrections: unit/CLI and complete broker integration suites |
 | ThreadSanitizer | Passed after final corrections: unit/CLI and complete broker integration suites; no race reports |
