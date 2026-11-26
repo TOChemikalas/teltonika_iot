@@ -1,5 +1,11 @@
 iot_display
-monitor.log
+tests/test_monitor
+
+*.log
+
+# Python env ir cache
 venv/
+.venv/
 __pycache__/
 *.pyc
+.pytest_cache/

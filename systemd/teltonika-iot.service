@@ -1,0 +1,19 @@
+[Unit]
+Description=Teltonika MQTT IoT Device Monitor
+
+[Service]
+Type=simple
+Environment=MQTT_HOST=localhost MQTT_PORT=1883 INACTIVE_AFTER=10 TEMP=30 HUMIDITY=80 BATTERY=20 MQTT_QOS=0
+EnvironmentFile=-%h/.config/teltonika-iot/monitor.env
+ExecStart=%h/.local/bin/iot_display -H ${MQTT_HOST} -P ${MQTT_PORT} --inactive-after ${INACTIVE_AFTER} --temp ${TEMP} --humidity ${HUMIDITY} --battery ${BATTERY} --qos ${MQTT_QOS}
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
