@@ -357,6 +357,46 @@ def test_rejected_logging(fixture):
           'no dashboard refresh on rejection, logging optional', flush=True)
 
 
+def test_json_nul_escape(fixture):
+    log = fixture.directory / 'nul-escape.log'
+    monitor, output = fixture.monitor('nul-escape', '-o', str(log))
+
+    # A real JSON Unicode NUL escape must be rejected.
+    invalid_payload = (
+        b'{"device_id":"nul_test","temperature":25,'
+        b'"humidity":50,"battery":80,"timestamp":1,'
+        b'"note":"\\u0000"}'
+    )
+
+    fixture.publish('nul_test', payload=invalid_payload)
+
+    wait_for(
+        lambda: len(rejected_records(log)) == 1,
+        'real Unicode NUL escape rejected'
+    )
+
+    assert 'Devices: 0 total' in last_snapshot(output)
+
+    # An escaped backslash followed by u0000 is valid JSON.
+    valid_payload = (
+        b'{"device_id":"nul_test","temperature":25,'
+        b'"humidity":50,"battery":80,"timestamp":2,'
+        b'"note":"\\\\u0000"}'
+    )
+
+    fixture.publish('nul_test', payload=valid_payload)
+
+    wait_for(
+        lambda: 'nul_test' in last_snapshot(output),
+        'literal backslash sequence accepted'
+    )
+
+    assert len(rejected_records(log)) == 1
+    assert '2 | nul_test | Temp:' in log.read_text()
+    assert stop(monitor) == 0
+
+    print('PASS: JSON Unicode NUL escape regression', flush=True)
+
 def test_log_failure(fixture):
     monitor, output = fixture.monitor('log-full', '-o', '/dev/full')
     fixture.publish('full01', temperature=31)
@@ -500,6 +540,7 @@ def main():
             test_malformed_numbers(fixture, 0)
             test_malformed_numbers(fixture, 1)
             test_rejected_logging(fixture)
+            test_json_nul_escape(fixture)
             test_log_failure(fixture)
             test_terminal(fixture)
             test_startup_shutdown(fixture)

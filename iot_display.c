@@ -16,7 +16,7 @@
 #include <mosquitto.h>
 #include <cjson/cJSON.h>
 
-#if ATOMIC_BOOL_LOCK_FREE != 2 //patikrinam ar signalui naudojamas atomic bool veikia be uzraktu
+#if ATOMIC_BOOL_LOCK_FREE != 2 // check if the atomic_bool is lock-free
 #error "This program requires lock-free atomic_bool for signal handling"
 #endif
 
@@ -35,13 +35,13 @@ static atomic_bool stop_requested = ATOMIC_VAR_INIT(false);
 static atomic_bool subscription_failed = ATOMIC_VAR_INIT(false);
 static atomic_bool runtime_failed = ATOMIC_VAR_INIT(false);
 
-static void handle_stop(int signal_number) // paspaudus Ctrl+C, pranesam programai kad laikas sustoti
-{
+static void handle_stop(int signal_number) // pressing Ctrl+C, we tell the system to stop the program, 
+{                                          // but we don't exit immediately, we let the main loop finish its work and exit gracefully
     (void)signal_number;
     atomic_store_explicit(&stop_requested, true, memory_order_relaxed);
 }
 
-static void format_timestamp(long long timestamp, char output[32]) // padaryt timestamp zmogui skaitomu formatu YYYY-MM-DD HH:MM:SS
+static void format_timestamp(long long timestamp, char output[32]) // make the timestamp human readable - format: YYYY-MM-DD HH:MM:SS
 {
     time_t seconds = (time_t)timestamp;
     struct tm *date = localtime(&seconds);
@@ -51,9 +51,11 @@ static void format_timestamp(long long timestamp, char output[32]) // padaryt ti
     }
 }
 
-// Caller holds state_mutex while the MQTT loop is running.
-static void display_devices(bool force) // atnaujinam terminala su naujausiais irenginiu duomenim
+
+ // Caller must hold state_mutex while the MQTT loop is running.
+static void display_devices(bool force)
 {
+    // Get the current time
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         perror("Cannot read monotonic clock");
@@ -61,71 +63,81 @@ static void display_devices(bool force) // atnaujinam terminala su naujausiais i
         atomic_store(&stop_requested, true);
         return;
     }
-    bool status_changed = false;
+
     size_t inactive_count = 0;
+    bool status_changed = false;
+
+    // Detect devices that became inactive or active since the last check.
     for (size_t i = 0; i < devices.count; i++) {
-        if (device_inactive(&devices.items[i], now, inactive_after))
+        const struct Telemetry *sensor = &devices.items[i];
+
+        bool inactive = device_inactive(sensor, now, inactive_after);
+        bool previously_inactive =
+            device_inactive(sensor, last_status_check, inactive_after);
+
+        if (inactive)
             inactive_count++;
-        if (device_inactive(&devices.items[i], now, inactive_after) !=
-            device_inactive(&devices.items[i], last_status_check, inactive_after))
+
+        if (inactive != previously_inactive)
             status_changed = true;
     }
+
     last_status_check = now;
+
+    // Avoid redundant output when stdout is not an interactive terminal.
     if (!interactive && !force && !status_changed)
         return;
+
     if (interactive)
         printf("\033[H\033[J");
 
     printf("IoT Device Monitor | Broker: %s | Devices: %zu total | Active: %zu | Inactive: %zu\n\n",
-           connected ? "connected" : "disconnected", devices.count,
-           devices.count - inactive_count, inactive_count);
+           connected ? "connected" : "disconnected",
+           devices.count, devices.count - inactive_count, inactive_count);
+
     if (mqtt_qos == 1)
         printf("Alert QoS 1 | Pending: %zu | Acknowledged: %zu\n",
                pending_alerts, acknowledged_alerts);
 
     printf("Active devices\n\n");
-    printf("     Device     %15s %12s %12s %-19s  %s\n",
+    printf("     Device      %15s %12s %12s %-19s  %s\n",
            "Temperature(C)", "Humidity(%)", "Battery(%)",
            "Last update", "Elapsed / Warnings");
-
     printf("----------------------------------------------------------------------------------------------------\n");
 
     for (size_t i = 0; i < devices.count; i++) {
         const struct Telemetry *sensor = &devices.items[i];
+
         if (device_inactive(sensor, now, inactive_after))
             continue;
 
         char age[32];
-        format_elapsed(elapsed_seconds(sensor->received_at, now), age);
         char date[32];
+
+        format_elapsed(elapsed_seconds(sensor->received_at, now), age);
         format_timestamp(sensor->timestamp, date);
 
         struct Warnings warnings = evaluate_thresholds(sensor, &thresholds);
-        bool high_temp = warnings.high_temperature;
-        bool high_hum = warnings.high_humidity;
-        bool low_bat = warnings.low_battery;
 
-        // +-centruojam irenginio ID jo stulpelyje
+        // Center the device ID in its 16-character column.
         int id_length = (int)strlen(sensor->device_id);
         int padding = id_length < 16 ? (16 - id_length) / 2 : 0;
 
         printf("%*s%-*s %9.2f %13.2f %9d         %-19s  ",
-            padding, "",
-            16 - padding, sensor->device_id,
-            sensor->temperature,
-            sensor->humidity,
-            sensor->battery,
-            date);
+               padding, "", 16 - padding, sensor->device_id,
+               sensor->temperature, sensor->humidity,
+               sensor->battery, date);
 
         printf("%-10s ", age);
-        if (!high_temp && !high_hum && !low_bat) {
+
+        if (!warnings.high_temperature && !warnings.high_humidity &&!warnings.low_battery) {
             printf("OK");
         } else {
-            if (high_temp)
+            if (warnings.high_temperature)
                 printf("HIGH_TEMPERATURE ");
-            if (high_hum)
+            if (warnings.high_humidity)
                 printf("HIGH_HUMIDITY ");
-            if (low_bat)
+            if (warnings.low_battery)
                 printf("LOW_BATTERY");
         }
 
@@ -136,22 +148,30 @@ static void display_devices(bool force) // atnaujinam terminala su naujausiais i
         printf("  None\n");
 
     printf("\nInactive devices%s\n\n",
-           connected || inactive_count == 0 ? "" : " - STALE (broker offline)");
+           connected || inactive_count == 0
+               ? "" : " - STALE (broker offline)");
+
     if (inactive_count == 0)
         printf("  None\n");
+
     for (size_t i = 0; i < devices.count; i++) {
         const struct Telemetry *sensor = &devices.items[i];
+
         if (!device_inactive(sensor, now, inactive_after))
             continue;
+
         char age[32];
         format_elapsed(elapsed_seconds(sensor->received_at, now), age);
+
         printf("  %-16s %s\n", sensor->device_id, age);
     }
 
     if (interactive)
         printf("\nPress Ctrl+C to exit.\n");
+
     fflush(stdout);
 }
+
 
 static void on_connect(struct mosquitto *mosq, void *userdata, int result)
 {
@@ -163,7 +183,7 @@ static void on_connect(struct mosquitto *mosq, void *userdata, int result)
 
     pthread_mutex_lock(&state_mutex);
     connected = true;
-    int rc = mosquitto_subscribe(mosq, NULL, "iot/devices/+/telemetry", mqtt_qos); // prisijungus uzsiprenumeruojam MQTT tema
+    int rc = mosquitto_subscribe(mosq, NULL, "iot/devices/+/telemetry", mqtt_qos); // upon connection, recconection we subscribe to the MQTT topic
     if (rc != MOSQ_ERR_SUCCESS) {
         fprintf(stderr, "Subscribe error: %s\n", mosquitto_strerror(rc));
         atomic_store(&subscription_failed, true);
@@ -174,18 +194,23 @@ static void on_connect(struct mosquitto *mosq, void *userdata, int result)
 
 static void on_disconnect(struct mosquitto *mosq, void *userdata, int result)
 {
+
     (void)mosq;
     (void)userdata;
     pthread_mutex_lock(&state_mutex);
     connected = false;
-    if (result != 0 && !atomic_load_explicit(&stop_requested, memory_order_relaxed)) {
+
+    // Report unexpected disconnections; the MQTT loop handles reconnection.
+    if (result != 0 &&
+        !atomic_load_explicit(&stop_requested, memory_order_relaxed)) {
         fprintf(stderr, "Broker connection lost; trying to reconnect.\n");
         display_devices(true);
     }
+
     pthread_mutex_unlock(&state_mutex);
 }
 
-static void on_subscribe(struct mosquitto *mosq, void *userdata, int mid, int qos_count, const int *granted_qos) // patikrinimas ar brokeris leido subscribint
+static void on_subscribe(struct mosquitto *mosq, void *userdata, int mid, int qos_count, const int *granted_qos) // check if the broker accepted our subscription request
 {
     (void)mosq;
     (void)userdata;
@@ -199,7 +224,7 @@ static void on_subscribe(struct mosquitto *mosq, void *userdata, int mid, int qo
     }
 }
 
-static void on_publish(struct mosquitto *mosq, void *userdata, int mid)
+static void on_publish(struct mosquitto *mosq, void *userdata, int mid) // Track how many MQTT QoS 1 alerts have been acknowledged by the broker.
 {
     (void)mosq;
     (void)userdata;
@@ -208,13 +233,19 @@ static void on_publish(struct mosquitto *mosq, void *userdata, int mid)
         return;
 
     pthread_mutex_lock(&state_mutex);
-    if (pending_alerts > 0)
+
+    // Count only acknowledgments for alerts recorded as pending.
+    if (pending_alerts > 0) {
         pending_alerts--;
-    acknowledged_alerts++;
+        acknowledged_alerts++;
+    }
+
     pthread_mutex_unlock(&state_mutex);
 }
 
-static void publish_alert(struct mosquitto *mosq, const struct Telemetry *sensor, const char *type, double value) // sukuriamas JSON ispejimas ir issiunciams per MQTT
+// Caller holds state_mutex.
+// Build and queue an MQTT alert, then log successful publish requests.
+static void publish_alert(struct mosquitto *mosq, const struct Telemetry *sensor, const char *type, double value) 
 {
     char topic[128];
 
@@ -228,7 +259,7 @@ static void publish_alert(struct mosquitto *mosq, const struct Telemetry *sensor
         fprintf(stderr, "Cannot allocate alert JSON.\n");
         return;
     }
-
+    // Add alert info
     if (cJSON_AddStringToObject(alert, "device_id", sensor->device_id) == NULL ||
         cJSON_AddStringToObject(alert, "alert", type) == NULL ||
         cJSON_AddNumberToObject(alert, "value", value) == NULL ||
@@ -243,7 +274,7 @@ static void publish_alert(struct mosquitto *mosq, const struct Telemetry *sensor
     if (payload != NULL) {
         int mid;
         int rc = mosquitto_publish(mosq, &mid, topic, (int)strlen(payload), payload, mqtt_qos, false);
-        // QoS 1 callbacks run later on this same MQTT thread, after PUBACK.
+        // QoS 1 acknowledgments are handled later by on_publish().
         if (rc == MOSQ_ERR_SUCCESS && mqtt_qos == 1)
             pending_alerts++;
         if (rc != MOSQ_ERR_SUCCESS) {
@@ -265,14 +296,17 @@ static void publish_alert(struct mosquitto *mosq, const struct Telemetry *sensor
     cJSON_Delete(alert);
 }
 
+// Record rejected MQTT messages in the optional log file
 static void log_rejected_telemetry(const char *topic, const char *reason)
 {
     pthread_mutex_lock(&state_mutex);
     if (log_file != NULL) {
+        //Prepare a safe topic string
         char safe_topic[256];
         size_t used = 0;
         const unsigned char *p = (const unsigned char *)(topic != NULL ? topic : "(unknown)");
         for (; *p != '\0'; p++) {
+            // Escape non-printable characters and truncate if necessary.
             bool escape = *p < 0x20 || *p >= 0x7f || *p == '\\' || *p == '|';
             size_t needed = escape ? 4 : 1;
             // Reserve space for a truncation marker and keep each record on one line.
@@ -281,6 +315,7 @@ static void log_rejected_telemetry(const char *topic, const char *reason)
                 used += 3;
                 break;
             }
+            // Write escaped characters
             if (escape) {
                 snprintf(safe_topic + used, 5, "\\x%02X", (unsigned int)*p);
                 used += 4;
@@ -289,6 +324,7 @@ static void log_rejected_telemetry(const char *topic, const char *reason)
             }
         }
         safe_topic[used] = '\0';
+        //write rejection record to log file
         int written = fprintf(log_file, "%lld | REJECTED | Topic: %s | Reason: %s\n",
                               (long long)time(NULL), safe_topic, reason);
         if (written < 0 || fflush(log_file) == EOF) {
@@ -305,6 +341,7 @@ static void on_message(struct mosquitto *mosq, void *userdata, const struct mosq
     (void)userdata;
     if (atomic_load_explicit(&stop_requested, memory_order_relaxed))
         return;
+
     struct timespec received_at;
     if (clock_gettime(CLOCK_MONOTONIC, &received_at) != 0) {
         perror("Cannot read telemetry receipt time");
@@ -312,15 +349,18 @@ static void on_message(struct mosquitto *mosq, void *userdata, const struct mosq
         atomic_store(&stop_requested, true);
         return;
     }
+
     struct Telemetry sensor;
+    // Validate incoming telemetry
     const char *error;
-    if (message->payloadlen <= 0 ||
-        !parse_telemetry(message->payload, (size_t)message->payloadlen, &sensor, &error)) {
+
+    if (message->payloadlen <= 0 || !parse_telemetry(message->payload, (size_t)message->payloadlen, &sensor, &error)) {
         const char *reason = message->payloadlen <= 0 ? "Empty telemetry payload." : error;
         fprintf(stderr, "%s\n", reason);
         log_rejected_telemetry(message->topic, reason);
         return;
     }
+    // Update the device
     sensor.received_at = received_at;
 
     pthread_mutex_lock(&state_mutex);
@@ -355,6 +395,7 @@ static void on_message(struct mosquitto *mosq, void *userdata, const struct mosq
     pthread_mutex_unlock(&state_mutex);
 }
 
+// Display available command-line options, their accepted values and defaults.
 static void print_usage(const char *program)
 {
     printf("Usage: %s [-H HOST] [-P PORT] [-o FILE] [OPTIONS]\n", program);
@@ -371,6 +412,7 @@ static void print_usage(const char *program)
 
 int main(int argc, char *argv[])
 {
+    // Default settings
     const char *host = "localhost";
     const char *log_path = NULL;
     int port = 1883;
@@ -384,7 +426,9 @@ int main(int argc, char *argv[])
         {"qos", required_argument, NULL, OPT_QOS},
         {NULL, 0, NULL, 0}
     };
+
     int option;
+    // Parse and validate command-line options before initializing the monitor.
     while ((option = getopt_long(argc, argv, "+H:P:o:h", options, NULL)) != -1) {
         unsigned int number;
         bool valid = true;
@@ -452,16 +496,17 @@ int main(int argc, char *argv[])
     struct mosquitto *mosq = NULL;
 
     const char *term = getenv("TERM");
-    interactive = isatty(STDOUT_FILENO) && term != NULL && term[0] != '\0' &&
-                  strcmp(term, "dumb") != 0;
+    interactive = isatty(STDOUT_FILENO) && term != NULL && term[0] != '\0' && strcmp(term, "dumb") != 0;
     struct sigaction action = {0};
     action.sa_handler = handle_stop;
     sigemptyset(&action.sa_mask);
+
     if (sigaction(SIGINT, &action, NULL) != 0 || sigaction(SIGTERM, &action, NULL) != 0) {
         perror("Cannot install shutdown handlers");
         goto cleanup;
     }
 
+    // Initialize MQTT
     if (mosquitto_lib_init() != MOSQ_ERR_SUCCESS) {
         fprintf(stderr, "MQTT library initialization failed.\n");
         goto cleanup;
@@ -480,6 +525,7 @@ int main(int argc, char *argv[])
     mosquitto_message_callback_set(mosq, on_message);
     mosquitto_publish_callback_set(mosq, on_publish);
 
+    // Start MQTT connection
     int rc = mosquitto_connect_async(mosq, host, port, 60);
     if (rc != MOSQ_ERR_SUCCESS) {
         fprintf(stderr, "MQTT connection setup failed: %s\n",
@@ -495,7 +541,8 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
     loop_started = true;
-
+    
+    // Application loop
     while (!atomic_load_explicit(&stop_requested, memory_order_relaxed) && !atomic_load(&subscription_failed)) {
         sleep(1);
         pthread_mutex_lock(&state_mutex);
@@ -505,7 +552,7 @@ int main(int argc, char *argv[])
 
     exit_code = atomic_load(&subscription_failed) || atomic_load(&runtime_failed) ? 1 : 0;
 
-// sustabdom MQTT ir atlaisvinama naudota atmintis
+// stop MQTT loop and disconnect from broker, free allocated memory, close log file, cleanup MQTT library
 cleanup:
     atomic_store(&stop_requested, true);
     if (mosq != NULL && loop_started && mqtt_qos == 1) {
